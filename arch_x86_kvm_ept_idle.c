@@ -315,10 +315,25 @@
  	ept_root = __va(mmu->root_hpa);//获取ept根页表的物理地址hpa
  
  	local_irq_disable();//屏蔽当前CPU上的所有中断
+  /***
+    #define pgd_offset_pgd(pgd, address) 
+        (pgd + pgd_index((address)))
+        pgd_index() is used get the offset into the pgd page's array of pgd_t's;
+  ***/
  	pgd = pgd_offset_pgd(ept_root, addr);
  	do {
+  /***
+    #define pgd_addr_end(addr, end)						\
+    ({	
+        unsigned long __boundary = ((addr) + PGDIR_SIZE) & PGDIR_MASK;	\
+	    (__boundary - 1 < (end) - 1)? __boundary: (end);		\
+    })
+    计算下一个将要被映射的虚拟地址，如果addr到end可以被一个pgd映射的话，那么返回end的值
+    //PGDIR_SIZE 就是页目录表中一个表项 (pgd_t) 对应的虚拟地址空间
+    //#define PGDIR_MASK (~(PGDIR_SIZE - 1))
+  ***/
  		next = pgd_addr_end(addr, end);
- 		if (!ept_pgd_present(*pgd)) {
+ 		if (!ept_pgd_present(*pgd)) {//no entry in EPT PGD?
  			set_restart_gpa(next, "PGD_HOLE");
  			continue;
  		}
@@ -326,7 +341,7 @@
  		err = ept_p4d_range(eic, pgd, addr, next);
  		if (err)
  			break;
- 	} while (pgd++, addr = next, addr != end);
+ 	} while (pgd++, addr = next, addr != end);//遍历pgd所有表项
  	local_irq_enable();//结束中断屏蔽
  out_unlock:
  	spin_unlock(&eic->kvm->mmu_lock);
