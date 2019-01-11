@@ -21,7 +21,11 @@ range_to_read from read_buffer_size, and let read() return when either
 read_buffer_size is filled, or range_to_read is fully scanned.
 
 To make a more precise interface, we may need further switch to ioctl().
- 
+– pgd:	page	global	directory	
+– pud:	page	upper	directory	
+– pmd:	page	middle	directory	
+– pte:	page	table	entry	
+分别提供ept的walk和正常页表的walk
 // SPDX-License-Identifier: GPL-2.0
  #include <linux/pagemap.h>
  #include <linux/mm.h>
