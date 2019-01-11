@@ -1,4 +1,28 @@
- // SPDX-License-Identifier: GPL-2.0
+For virtual machines, "accessed" bits will be set in guest page tables
+and EPT/NPT. So for qemu-kvm process, convert HVA to GFN to GPA, then do
+EPT/NPT walks.
+
+This borrows host page table walk macros/functions to do EPT/NPT walk.
+So it depends on them using the same level.
+
+As proposed by Dave Hansen, invalidate TLB when finished one round of
+scan, in order to ensure HW will set accessed bit for super-hot pages.
+
+V2: convert idle_bitmap to idle_pages to be more efficient on
+- huge pages
+- sparse page table
+- ranges of similar pages
+
+The new idle_pages file contains a series of records of different size
+reporting ranges of different page size to user space. That interface
+has a major downside: it breaks read() assumption about range_to_read ==
+read_buffer_size. Now we workaround this problem by deducing
+range_to_read from read_buffer_size, and let read() return when either
+read_buffer_size is filled, or range_to_read is fully scanned.
+
+To make a more precise interface, we may need further switch to ioctl().
+ 
+// SPDX-License-Identifier: GPL-2.0
  #include <linux/pagemap.h>
  #include <linux/mm.h>
  #include <linux/kernel.h>
@@ -118,10 +142,10 @@
  	dump_eic(eic);
  
  	/* align kernel/user vision of cursor position */
- 	next = round_up(next, page_size);
+ 	next = round_up(next, page_size);//对齐next地址
  
  	if (!eic->pie_read ||
- 	    addr + eic->gpa_to_hva != eic->next_hva) {
+ 	    addr + eic->gpa_to_hva != eic->next_hva) {//校验读操作和地址有效性
  		/* merge hole */
  		if (page_type == PTE_HOLE ||
  		    page_type == PMD_HOLE) {
@@ -142,6 +166,10 @@
  		eic_report_addr(eic, round_down(addr, page_size) +
  							eic->gpa_to_hva);
  	} else {
+		/*
+		#define PIP_TYPE(a)		(0xf & (a >> 4))
+		#define PIP_SIZE(a)		(0xf & a)
+		*/
  		if (PIP_TYPE(eic->kpie[eic->pie_read - 1]) == page_type &&
  		    PIP_SIZE(eic->kpie[eic->pie_read - 1]) < 0xF) {
  			set_next_hva(next + eic->gpa_to_hva, "IN-PLACE INC");
@@ -158,6 +186,7 @@
  
  	set_next_hva(next + eic->gpa_to_hva, "NEW-ITEM");
  	set_restart_gpa(next, "NEW-ITEM");
+	/*#define PIP_COMPOSE(type, nr)	((type << 4) | nr)*/
  	eic->kpie[eic->pie_read] = PIP_COMPOSE(page_type, 1);
  	eic->pie_read++;
  
@@ -176,9 +205,9 @@
  		if (!ept_pte_present(*pte))
  			page_type = PTE_HOLE;
  		else if (!test_and_clear_bit(_PAGE_BIT_EPT_ACCESSED,
- 					     (unsigned long *) &pte->pte))
+ 					     (unsigned long *) &pte->pte))//空闲
  			page_type = PTE_IDLE;
- 		else {
+ 		else {//被访问过
  			page_type = PTE_ACCESSED;
  		}
  
@@ -210,8 +239,14 @@
  
  		if (!ept_pmd_present(*pmd))
  			page_type = PMD_HOLE;	/* likely won't hit here */
- 		else if (!test_and_clear_bit(_PAGE_BIT_EPT_ACCESSED,
- 					     (unsigned long *)pmd)) {
+		 /*
+		在起始地址为addr的位图中清除第nr位；并返回原来的值，原子操作。
+		#define _PAGE_BIT_EPT_ACCESSED	8
+		#define _PAGE_EPT_ACCESSED	(_AT(pteval_t, 1) << _PAGE_BIT_EPT_ACCESSED)
+		#define _PAGE_EPT_PRESENT	(_AT(pteval_t, 7))
+		*/
+ 		else if (!test_and_clear_bit(_PAGE_BIT_EPT_ACCESSED,(unsigned long *)pmd))//未被访问过 
+		{
  			if (pmd_large(*pmd))
  				page_type = PMD_IDLE;
  			else if (eic->flags & SCAN_SKIM_IDLE)
@@ -249,7 +284,12 @@
  			set_restart_gpa(next, "PUD_HOLE");
  			continue;
  		}
- 
+  /*
+ pud_large usage replaced with pud_huge for general hugetlb
+ code imported into mm. 大页面的应用
+ 可以参考https://www.ibm.com/developerworks/cn/linux/1305_zhangli_hugepage/index.html信息，
+ 在大页存在的情况下，大页的pmd页表的entry将直接指向页的物理地址    
+ */
  		if (pud_large(*pud))
  			err = eic_add_page(eic, addr, next, PUD_PRESENT);
  		else
@@ -383,13 +423,13 @@
  	bytes_read = eic->pie_read;
  	if (!bytes_read)
  		return 1;
- 
+ 	/*这个函数的主要作用就是从内核空间拷贝一块儿数据到用户空间,将数据从kpie 拷贝bytes_read长度到buf中*/
  	ret = copy_to_user(eic->buf, eic->kpie, bytes_read);
  	if (ret)
  		return -EFAULT;
  
  	eic->buf += bytes_read;
- 	eic->bytes_copied += bytes_read;
+ 	eic->bytes_copied += bytes_read;// copy的长度
  	if (eic->bytes_copied >= eic->buf_size)
  		return EPT_IDLE_BUF_FULL;
  	if (lc)
